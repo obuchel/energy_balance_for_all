@@ -1,0 +1,48 @@
+name: Food reminders
+
+# Emails people who usually log a food around now but haven't today (see reminders/send-reminders.mjs).
+# Runs twice an hour; GitHub may delay scheduled runs a few minutes. Safe to run more often: each
+# habit is reminded at most once a day and a person gets at most 2 emails a day.
+on:
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (print emails, send nothing)'
+        type: boolean
+        default: true
+
+concurrency:
+  group: food-reminders
+  cancel-in-progress: false
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Send reminders
+        env:
+          # Repository secrets (Settings > Secrets and variables > Actions)
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          # Repository variables
+          FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+          APP_URL: ${{ vars.APP_URL }}
+          REMINDER_FROM: ${{ vars.REMINDER_FROM }}
+          REMINDER_ALLOWED_EMAILS: ${{ vars.REMINDER_ALLOWED_EMAILS }}
+          DEFAULT_TZ: America/Toronto
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            node reminders/send-reminders.mjs --dry-run
+          else
+            node reminders/send-reminders.mjs
+          fi
