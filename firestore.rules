@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+    // Admin = obuchel@gmail.com in the long-covid project (read-only access to everyone's data).
+    function isAdmin() {
+      return signedIn() && request.auth.uid == 'GeIPWBAjMrQecNE6yIG7F3FfCMp1';
+    }
+
+    // A user's profile document...
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create, update, delete: if isOwner(uid);
+
+      // ...and everything beneath it: food_journal, symptomData, settings, ...
+      match /{path=**} {
+        allow read: if isOwner(uid) || isAdmin();
+        allow write: if isOwner(uid);
+      }
+    }
+
+    // Shared food reference data (used by the Food Manager). Any signed-in user may read; only the admin may change it.
+    match /meals/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // Legacy per-user food logs (only touched when a user deletes their account).
+    match /foodLogs/{id} {
+      allow read, delete: if signedIn() && resource.data.userId == request.auth.uid;
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+    }
+
+    // Everything else is closed to browsers/apps. Server-side code that uses the Admin SDK
+    // (Fitbit / HealthKit sync, scripts) is NOT affected by these rules.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,638 @@
+import React from 'react';
+import { getHealthBenefits, getHealthCautions, getRecommendedServings } from './healthDataAdapter';
+
+// Conversion utilities
+const GRAMS_PER_OUNCE = 28.3495;
+
+const convertWeight = {
+  ozToG: (oz) => oz * GRAMS_PER_OUNCE,
+  gToOz: (g) => g / GRAMS_PER_OUNCE,
+};
+
+// ServingSuggestions component
+const ServingSuggestions = ({ selectedMeal, onServingSelect, currentServing, currentUnit = 'g', userUnitSystem = 'metric' }) => {
+  if (!selectedMeal) return null;
+
+  // Use new generic accessor — reads recommendedServings OR legacy longCovidServings
+  const recommendedServings = getRecommendedServings(selectedMeal);
+
+  // Fall back to old format for backward compatibility
+  const legacyServingOptions = selectedMeal.nutritional_metrics?.serving_options;
+
+  const isSelected = (weight, unit = 'g') => {
+    const weightMatch = parseFloat(currentServing) === parseFloat(weight);
+    const unitMatch = (currentUnit || 'g') === (unit || 'g');
+    return weightMatch && unitMatch;
+  };
+
+  const handleServingClick = (weight, description, unit = 'g') => {
+    console.log('Serving button clicked:', { weight, description, unit });
+    if (onServingSelect && typeof onServingSelect === 'function') {
+      onServingSelect(weight, description, unit);
+    } else {
+      console.error('onServingSelect is not a function:', onServingSelect);
+    }
+  };
+
+  const parseServingAmount = (amountString) => {
+    const match = amountString.match(/(\d+)(ml|g)/i);
+    if (match) {
+      return { weight: parseFloat(match[1]), unit: match[2].toLowerCase() };
+    }
+    return { weight: 100, unit: 'g' };
+  };
+
+  const convertServingForDisplay = (weight, unit) => {
+    if (currentUnit === 'oz' && unit === 'g') {
+      const oz = convertWeight.gToOz(weight);
+      return { weight: Math.round(oz * 10) / 10, unit: 'oz', originalWeight: weight, originalUnit: unit };
+    }
+    if (currentUnit === 'g' && unit === 'oz') {
+      const g = convertWeight.ozToG(weight);
+      return { weight: Math.round(g), unit: 'g', originalWeight: weight, originalUnit: unit };
+    }
+    return { weight, unit, originalWeight: weight, originalUnit: unit };
+  };
+
+  const getUnitIcon = (unit) => {
+    switch (unit) {
+      case 'ml': return '🥤';
+      case 'g': return '⚖️';
+      case 'oz': return '🥛';
+      default: return '📏';
+    }
+  };
+
+  const getTimingIcon = (timing) => {
+    if (!timing) return '🕐';
+    if (timing.includes('breakfast')) return '🌅';
+    if (timing.includes('lunch')) return '☀️';
+    if (timing.includes('dinner')) return '🌙';
+    if (timing.includes('snack')) return '🍎';
+    if (timing.includes('post') || timing.includes('activity')) return '💪';
+    return '🕐';
+  };
+
+  return (
+    <div className="serving-suggestions">
+      <h4>📏 Serving Recommendations</h4>
+
+      {/* Recommended servings — primary */}
+      {recommendedServings.length > 0 && (
+        <div className="serving-category long-covid-servings">
+          <div className="serving-note info">
+            <small>💡 Serving sizes tailored to support your health needs and digestive tolerance</small>
+            <small>⚖️ Nutritional values are calculated per 100g/ml and automatically scaled to your selected serving</small>
+          </div>
+
+          <div className="serving-buttons long-covid">
+            {recommendedServings.map((serving, index) => {
+              const parsed = parseServingAmount(serving.amount);
+              const displayed = convertServingForDisplay(parsed.weight, parsed.unit);
+              const selected = isSelected(displayed.weight, displayed.unit);
+
+              return (
+                <button
+                  key={`serving-${index}`}
+                  className={`serving-button long-covid ${selected ? 'selected' : ''}`}
+                  onClick={() => handleServingClick(displayed.weight, serving.name, displayed.unit)}
+                  title={serving.reason}
+                  data-unit={displayed.unit}
+                  data-selected={selected}
+                >
+                  <div className="serving-header">
+                    <span className="serving-icon">{getUnitIcon(displayed.unit)}</span>
+                    <span className="serving-weight">{displayed.weight}{displayed.unit}</span>
+                    {displayed.unit !== displayed.originalUnit && (
+                      <span className="serving-conversion">({displayed.originalWeight}{displayed.originalUnit})</span>
+                    )}
+                  </div>
+                  <div className="serving-details">
+                    <span className="serving-name">{serving.name}</span>
+                    <div className="serving-timing">
+                      <span className="timing-icon">{getTimingIcon(serving.timing)}</span>
+                      <span className="timing-text">{serving.timing}</span>
+                    </div>
+                    <p className="serving-reason">{serving.reason}</p>
+                    <p className="serving-visualEquivalent">{serving.visualEquivalent}</p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Legacy serving options for backward compatibility */}
+      {!recommendedServings.length && legacyServingOptions && Object.keys(legacyServingOptions).length > 0 && (
+        <div className="serving-category standard-servings">
+          <small className="category-label">Standard Servings</small>
+          <div className="serving-buttons standard">
+            {Object.entries(legacyServingOptions).map(([key, option]) => {
+              const displayed = convertServingForDisplay(option.weight, option.unit);
+              const selected = isSelected(displayed.weight, displayed.unit);
+
+              return (
+                <button
+                  key={key}
+                  className={`serving-button standard ${selected ? 'selected' : ''}`}
+                  onClick={() => handleServingClick(displayed.weight, option.description, displayed.unit)}
+                  title={option.description}
+                  data-unit={displayed.unit}
+                  data-selected={selected}
+                >
+                  <div className="serving-header">
+                    <span className="serving-icon">{getUnitIcon(displayed.unit)}</span>
+                    <span className="serving-weight">{displayed.weight}{displayed.unit}</span>
+                    {displayed.unit !== displayed.originalUnit && (
+                      <span className="serving-conversion">({displayed.originalWeight}{displayed.originalUnit})</span>
+                    )}
+                  </div>
+                  <div className="serving-details">
+                    <span className="serving-name">{option.description}</span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// HealthFoodInfo component — generic health panel for all users
+// Reads both new (healthBenefits) and legacy (longCovidBenefits) field names via adapter
+const HealthFoodInfo = ({ foodName, mealData }) => {
+  if (!mealData) {
+    return (
+      <div className="no-food-info">
+        <p>Select a food to see its nutrition and health information</p>
+      </div>
+    );
+  }
+
+  const benefits  = getHealthBenefits(mealData);
+  const cautions  = getHealthCautions(mealData);
+  const healthRelevance = mealData.healthRelevance || mealData.longCovidRelevance || {};
+  const properties = mealData.properties || {};
+  const functionalCompounds = mealData.functionalCompounds || {};
+
+  if (benefits.length > 0 || cautions.length > 0 || Object.keys(healthRelevance).length > 0) {
+    const antiInflammatoryLevel = healthRelevance.antiInflammatory || 'unknown';
+
+    const getRelevanceBadge = (level) => {
+      switch (level) {
+        case 'very-high':
+        case 'high':    return { text: 'High',    class: 'high',     icon: '🟢' };
+        case 'moderate': return { text: 'Moderate', class: 'moderate', icon: '🟡' };
+        case 'low':      return { text: 'Low',      class: 'low',      icon: '🟠' };
+        case 'very-low':
+        case 'negative': return { text: 'Caution',  class: 'negative', icon: '🔴' };
+        default:         return { text: 'Unknown',  class: 'unknown',  icon: 'ℹ️' };
+      }
+    };
+
+    return (
+      <div className="long-covid-food-info">
+        <h4>{foodName}</h4>
+
+        {/* Properties Tags */}
+        {Object.keys(properties).length > 0 && (
+          <div className="properties-section">
+            <div className="property-tags">
+              {properties.fodmap && (
+                <span className={`property-tag fodmap ${properties.fodmap === 'low' ? 'low-fodmap' : 'high-fodmap'}`}>
+                  {properties.fodmap === 'low' ? '✓ Low FODMAP' : '⚠️ High FODMAP'}
+                </span>
+              )}
+              {properties.histamine === 'low' && (
+                <span className="property-tag histamine-low">✓ Low Histamine</span>
+              )}
+              {properties.safeForMCAS && (
+                <span className="property-tag mcas-safe">✓ MCAS Safe</span>
+              )}
+              {properties.dairyFree && (
+                <span className="property-tag dairy-free">🌱 Dairy Free</span>
+              )}
+              {properties.glutenFree && (
+                <span className="property-tag gluten-free">🌾 Gluten Free</span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Key Health Relevance Metrics */}
+        <div className="covid-relevance-grid">
+          <div className="relevance-item">
+            <b>🔥 Anti-Inflammatory</b>
+            <span className={`level-indicator level-${antiInflammatoryLevel}`}>
+              <span className="level-value"> {getRelevanceBadge(antiInflammatoryLevel).text}</span>
+            </span>
+          </div>
+
+          {healthRelevance.energyImpact && (
+            <div className="relevance-item">
+              <b>⚡ Energy Impact</b>
+              <span className={`level-indicator level-${healthRelevance.energyImpact}`}>
+                <span className="level-value"> {getRelevanceBadge(healthRelevance.energyImpact).text}</span>
+              </span>
+            </div>
+          )}
+
+          {healthRelevance.mitochondrialSupport && (
+            <div className="relevance-item">
+              <b>🔋 Mitochondrial Support</b>
+              <span className={`level-indicator level-${healthRelevance.mitochondrialSupport}`}>
+                <span className="level-value"> {getRelevanceBadge(healthRelevance.mitochondrialSupport).text}</span>
+              </span>
+            </div>
+          )}
+
+          {healthRelevance.immuneModulating && (
+            <div className="relevance-item">
+              <b>🛡️ Immune Support</b>
+              <span className={`level-indicator level-${healthRelevance.immuneModulating}`}>
+                <span className="level-value"> {getRelevanceBadge(healthRelevance.immuneModulating).text}</span>
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Functional Compounds */}
+        {Object.keys(functionalCompounds).length > 0 && (
+          <div className="functional-compounds">
+            <b>🧬 Functional Compounds</b>
+            <ul className="compounds-grid">
+              {Object.entries(functionalCompounds).map(([compound, level]) => {
+                const badge = getRelevanceBadge(level);
+                return (
+                  <li key={compound} className="compounds-item">
+                    <span className="compound-name">{compound.replace(/_/g, ' ')}</span>
+                    <span className={`compound-level level-${badge.class}`}> {badge.text}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
+        {/* Benefits */}
+        {benefits.length > 0 && (
+          <div className="benefits-list">
+            <b>✨ Health Benefits</b>
+            <ul>
+              {benefits.map((benefit, i) => <li key={i}>{benefit}</li>)}
+            </ul>
+          </div>
+        )}
+
+        {/* Cautions */}
+        {cautions.length > 0 && (
+          <div className="cautions-list">
+            <b>⚠️ Important Considerations</b>
+            <ul>
+              {cautions.map((caution, i) => <li key={i}>{caution}</li>)}
+            </ul>
+          </div>
+        )}
+
+        {/* Data Source Note */}
+        {mealData.fndds_metadata && (
+          <div className="data-source">
+            <div><small> 📊 Source: {mealData.fndds_metadata.source} </small></div>
+            <div><small>Category: {mealData.fndds_metadata.wweia_category}</small></div>
+            {mealData.ai_metadata_assessment && (
+              <small className="ai-assessment">
+                🤖 AI Assessment: {mealData.ai_metadata_assessment.overall} confidence
+              </small>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="no-food-info">
+      <div className="no-data-icon">📊</div>
+      <h4>No Detailed Health Data Available</h4>
+      <p>This food doesn't have specific health information in our database yet.</p>
+      <p>Consider general anti-inflammatory principles:</p>
+      <ul className="general-tips">
+        <li>Choose whole, unprocessed versions when possible</li>
+        <li>Pay attention to how it affects your symptoms</li>
+        <li>Consider portion sizes and frequency</li>
+        <li>Pair with known anti-inflammatory foods</li>
+      </ul>
+    </div>
+  );
+};
+
+// HealthSidePanel — shows food health info in the sidebar
+const HealthSidePanel = ({ selectedFood, selectedMeal, foodLog = [], isSearching = false, searchTerm = '' }) => {
+  if (selectedFood && selectedMeal) {
+    return (
+      <div className="long-covid-side-panel">
+        <h3>🥗 Health Nutrition Guide</h3>
+        <div className="selected-food-analysis">
+          <HealthFoodInfo foodName={selectedFood} mealData={selectedMeal} />
+          <div className="back-to-guide">
+            <p className="guide-hint">
+              <em>Clear selection to see the full nutrition guide</em>
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isSearching && searchTerm.length >= 2) {
+    return (
+      <div className="long-covid-side-panel">
+        <h3>🥗 Health Nutrition Guide</h3>
+        <div className="search-status">
+          <p className="search-hint">
+            <em>Searching for "{searchTerm}"... Select a food above to see its specific analysis.</em>
+          </p>
+        </div>
+        <div className="nutrition-categories">
+          <div className="category-section beneficial">
+            <h4>✅ Quick Anti-Inflammatory Guide</h4>
+            <p>Focus on omega-3 rich fish, berries, leafy greens, and anti-inflammatory spices.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="long-covid-side-panel">
+      <h3>🥗 Health Nutrition Guide</h3>
+
+      <div className="nutrition-categories">
+        <div className="category-section beneficial">
+          <h4>✅ Anti-Inflammatory Foods</h4>
+          <ul>
+            <li><strong>Fatty Fish:</strong> Salmon, mackerel, sardines (omega-3s)</li>
+            <li><strong>Berries:</strong> Blueberries, strawberries (antioxidants)</li>
+            <li><strong>Leafy Greens:</strong> Spinach, kale (vitamins, minerals)</li>
+            <li><strong>Nuts:</strong> Walnuts, almonds (healthy fats)</li>
+            <li><strong>Turmeric:</strong> Contains curcumin (anti-inflammatory)</li>
+            <li><strong>Ginger:</strong> Natural anti-inflammatory</li>
+            <li><strong>Green Tea:</strong> Polyphenols reduce inflammation</li>
+          </ul>
+        </div>
+
+        <div className="category-section neutral">
+          <h4>ℹ️ Recommended Foods</h4>
+          <ul>
+            <li><strong>Whole Grains:</strong> Oats, quinoa, brown rice</li>
+            <li><strong>Legumes:</strong> Lentils, chickpeas (protein, fiber)</li>
+            <li><strong>Fermented Foods:</strong> Yogurt, kefir (probiotics)</li>
+            <li><strong>Olive Oil:</strong> Extra virgin (healthy fats)</li>
+          </ul>
+        </div>
+
+        <div className="category-section caution">
+          <h4>⚠️ Foods to Limit</h4>
+          <ul>
+            <li><strong>Processed Foods:</strong> High in inflammatory compounds</li>
+            <li><strong>Added Sugars:</strong> Can trigger inflammation</li>
+            <li><strong>Refined Carbs:</strong> White bread, pastries</li>
+            <li><strong>Trans Fats:</strong> Margarine, fried foods</li>
+          </ul>
+        </div>
+      </div>
+
+      <div className="guide-footer">
+        <p><em>💡 Select a food item above to see detailed nutritional analysis</em></p>
+      </div>
+    </div>
+  );
+};
+
+// Main AddFoodTab Component
+const AddFoodTab = ({
+  search, setSearch, suggestions, selectedMeal, fields, mealType, setMealType,
+  time, date, setDate, renderSearchInput, editingEntry, handleCancelEdit,
+  handleFieldChange, handleServingSelection, handleTimeChange, handleUnitChange,
+  convertTo24Hour, handleLogFood, loading, success, error, mealTypes,
+  pyodideStatus, foodLog, MicronutrientRadarChart, userProfile
+}) => {
+  const userUnitSystem = userProfile?.unitSystem || 'metric';
+  const servingUnit = fields.servingUnit || (userUnitSystem === 'imperial' ? 'oz' : 'g');
+
+  // Determine banner text based on whether user has a condition
+  const getBannerText = () => {
+    if (!userProfile?.hasCondition && !userProfile?.hasLongCovid) {
+      return 'All nutritional values are calculated from per 100g base data and scaled to your serving.';
+    }
+    return 'Recommendations are tailored to support your health condition and nutritional needs.';
+  };
+
+  return (
+    <div className="food-form-section">
+      <div className="food-form-left">
+        {/* Edit Mode Indicator */}
+        {editingEntry && (
+          <div className="edit-mode-banner">
+            <div className="edit-indicator">
+              <span className="edit-icon">✏️</span>
+              <span className="edit-text">
+                <strong>Editing:</strong> {editingEntry.name}
+              </span>
+            </div>
+            <button className="cancel-edit-btn" onClick={handleCancelEdit} type="button">
+              Cancel Edit
+            </button>
+          </div>
+        )}
+
+        {/* Info Banner */}
+        <div className="long-covid-info-banner">
+          <span className="banner-icon">🩺</span>
+          <span className="banner-text">{getBannerText()}</span>
+        </div>
+
+        {renderSearchInput()}
+
+        {/* Serving suggestions */}
+        {selectedMeal && (
+          <>
+            <ServingSuggestions
+              selectedMeal={selectedMeal}
+              onServingSelect={handleServingSelection}
+              currentServing={fields.serving}
+              currentUnit={servingUnit}
+              userUnitSystem={userUnitSystem}
+            />
+            <div className="nutrition-calculation-note">
+              <small>
+                📊 <strong>Note:</strong> All values below are automatically calculated from the per 100g/ml base data and scaled to your selected serving size.
+              </small>
+            </div>
+          </>
+        )}
+
+        <div className="form-row">
+          <div className="form-group">
+            <input name="protein" value={fields.protein || ''} onChange={handleFieldChange}
+              type="number" step="0.1" placeholder=" " readOnly={selectedMeal} />
+            <label>Protein (g)</label>
+          </div>
+          <div className="form-group">
+            <input name="carbs" value={fields.carbs || ''} onChange={handleFieldChange}
+              type="number" step="0.1" placeholder=" " readOnly={selectedMeal} />
+            <label>Carbs (g)</label>
+          </div>
+          <div className="form-group">
+            <input name="fat" value={fields.fat || ''} onChange={handleFieldChange}
+              type="number" step="0.1" placeholder=" " readOnly={selectedMeal} />
+            <label>Fat (g)</label>
+          </div>
+
+          {/* Serving input with unit selector */}
+          <div className="form-group serving-with-unit">
+            <div className="serving-input-group">
+              <input
+                name="serving" value={fields.serving || ''} onChange={handleFieldChange}
+                type="number" step={servingUnit === 'oz' ? '0.1' : '1'}
+                className="serving-input" placeholder=" "
+              />
+              <select name="servingUnit" value={servingUnit} onChange={handleUnitChange} className="unit-selector">
+                <option value="g">g</option>
+                <option value="oz">oz</option>
+              </select>
+            </div>
+            <label>Serving</label>
+          </div>
+        </div>
+
+        {/* Meal details */}
+        <div className="form-row">
+          <div className="form-group meal-type-group">
+            <label htmlFor="meal-type">Meal Type</label>
+            <select id="meal-type" value={mealType} onChange={e => setMealType(e.target.value)}>
+              {mealTypes.map(type => <option key={type} value={type}>{type}</option>)}
+            </select>
+          </div>
+          <div className="form-group">
+            <input type="time" value={convertTo24Hour(time)} onChange={handleTimeChange} placeholder=" " />
+            <label>Time</label>
+          </div>
+          <div className="form-group">
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} placeholder=" " />
+            <label>Date</label>
+          </div>
+        </div>
+
+        <div className="form-row">
+          <div className="form-group">
+            <input name="calories" value={fields.calories || ''} onChange={handleFieldChange}
+              type="number" step="1" placeholder=" " readOnly={selectedMeal} />
+            <label>Calories</label>
+          </div>
+        </div>
+
+        {/* Micronutrient radar chart */}
+        {selectedMeal && fields.micronutrients && (
+          <div className="micronutrient-display">
+            <MicronutrientRadarChart micronutrients={fields.micronutrients} selectedMeal={selectedMeal} />
+          </div>
+        )}
+
+        {/* Submit button */}
+        <button onClick={handleLogFood} disabled={loading} className="log-food-button">
+          {loading ? (
+            <><span className="loading-spinner"></span>{editingEntry ? 'Updating Entry...' : 'Logging Food...'}</>
+          ) : (
+            <>{editingEntry ? '✅ Update Entry' : '✅ Log Food'}</>
+          )}
+        </button>
+
+        {success && <div className="success-message">{success}</div>}
+        {error && <div className="error-message">{error}</div>}
+
+        {pyodideStatus && <div className="pyodide-status">{pyodideStatus}</div>}
+      </div>
+
+      {/* Health side panel */}
+      <div className="long-covid-panel-container">
+        <HealthSidePanel
+          selectedFood={search}
+          selectedMeal={selectedMeal}
+          foodLog={foodLog}
+          isSearching={search.length >= 2}
+          searchTerm={search}
+        />
+      </div>
+
+      <style jsx>{`
+        .long-covid-info-banner {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 12px 18px;
+          background: linear-gradient(135deg, rgba(102, 126, 234, 0.08), rgba(118, 75, 162, 0.08));
+          border: 1px solid rgba(102, 126, 234, 0.2);
+          border-radius: 10px;
+          font-size: 14px;
+          color: #4a5568;
+          margin-bottom: 16px;
+          line-height: 1.4;
+        }
+        .long-covid-info-banner .banner-icon { font-size: 18px; flex-shrink: 0; }
+        .long-covid-info-banner .banner-text { flex: 1; }
+
+        .serving-with-unit { position: relative; min-width: 160px; flex: 1; }
+        .serving-input-group { display: flex; gap: 0.25rem; align-items: stretch; width: 100%; }
+        .serving-input {
+          flex: 1; min-width: 0; padding: 0.75rem 1rem;
+          border: 2px solid var(--gray-300, #d1d5db);
+          border-radius: var(--border-radius-lg, 12px);
+          font-size: 1rem; background: rgba(255, 255, 255, 0.9); transition: all 0.2s ease;
+        }
+        .serving-input:focus {
+          outline: none; border-color: var(--primary-color, #3b82f6);
+          box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+        }
+        .serving-input:hover { border-color: var(--gray-400, #9ca3af); }
+        .unit-selector {
+          width: 60px; padding: 0.75rem 0.5rem;
+          border: 2px solid var(--gray-300); border-radius: var(--border-radius-lg);
+          font-size: 0.875rem; background: rgba(255, 255, 255, 0.9);
+          cursor: pointer; transition: var(--transition);
+        }
+        .unit-selector:focus {
+          outline: none; border-color: var(--primary-color);
+          box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+        }
+        .unit-selector:hover { border-color: var(--primary-color); }
+        .serving-conversion { font-size: 0.75rem; color: var(--gray-500); margin-left: 0.25rem; }
+
+        @media (max-width: 768px) {
+          .serving-input-group { flex-direction: row; }
+          .unit-selector { width: 55px; }
+          .serving-input { min-width: 80px; }
+        }
+        @media (max-width: 1024px) {
+          .serving-with-unit { min-width: 140px; }
+        }
+      `}</style>
+    </div>
+  );
+};
+
+export default AddFoodTab;
+
+// Named exports — old names kept as aliases for backward compatibility
+export {
+  ServingSuggestions,
+  HealthFoodInfo,
+  HealthFoodInfo as LongCovidFoodInfo,   // legacy alias
+  HealthSidePanel,
+  HealthSidePanel as LongCovidSidePanel, // legacy alias
+  convertWeight,
+  GRAMS_PER_OUNCE
+};

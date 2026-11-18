@@ -1,0 +1,861 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { db, auth } from '../../firebase-config';
+import { doc, updateDoc, getDoc, deleteDoc, collection, query, where, getDocs, writeBatch } from 'firebase/firestore';
+import { updatePassword, reauthenticateWithCredential, EmailAuthProvider, signOut, deleteUser } from 'firebase/auth';
+import "../Common.css";
+import "./PersonalSettings.css";
+
+import {
+  ArrowLeft, Save, User, Mail, Lock, Calendar, Scale, Ruler, Check,
+  Eye, EyeOff, LogOut, Trash2, AlertTriangle
+} from 'lucide-react';
+
+// Expanded symptom list — covers Long COVID, ME/CFS, fibromyalgia, histamine issues, and general
+const symptomOptions = [
+  'Fatigue',
+  'Post-exertional malaise',
+  'Brain fog',
+  'Headaches',
+  'Shortness of breath',
+  'Heart palpitations',
+  'Dizziness',
+  'Joint/muscle pain',
+  'Sleep disturbances',
+  'Temperature regulation issues',
+  'Digestive issues',
+  'Nausea',
+  'Anxiety',
+  'Chronic pain',
+  'Skin reactions',
+  'Histamine sensitivity',
+];
+
+const CONDITION_TYPES = [
+  { value: 'long_covid', label: 'Long COVID' },
+  { value: 'me_cfs', label: 'ME/CFS' },
+  { value: 'fibromyalgia', label: 'Fibromyalgia' },
+  { value: 'histamine_intolerance', label: 'Histamine Intolerance / MCAS' },
+  { value: 'other', label: 'Other chronic condition' },
+];
+
+const convertWeight = {
+  lbsToKg: (lbs) => lbs * 0.453592,
+  kgToLbs: (kg) => kg * 2.20462,
+};
+
+const convertHeight = {
+  feetInchesToCm: (feet, inches) => (feet * 12 + inches) * 2.54,
+  cmToFeetInches: (cm) => {
+    const totalInches = cm / 2.54;
+    const feet = Math.floor(totalInches / 12);
+    const inches = Math.round(totalInches % 12);
+    return { feet, inches };
+  },
+};
+
+/**
+ * Detects whether a Firestore user doc (old or new format) has a condition,
+ * and returns a normalized conditionType for the form.
+ */
+const detectConditionFromFirestore = (data) => {
+  // New format first
+  if (data.hasCondition !== undefined) {
+    return {
+      hasCondition: !!data.hasCondition,
+      conditionType: data.conditionType || '',
+      conditionOnsetDate: data.conditionOnsetDate || '',
+      conditionDuration: data.conditionDuration || '',
+      conditionSeverity: data.conditionSeverity || '',
+    };
+  }
+
+  // Legacy Long COVID format — migrate on read
+  const legacySeverity = data.covid_severity || data.longCovidSeverity || data.severity || '';
+  const hasLegacyCondition = data.hasLongCovid === true || (legacySeverity && legacySeverity !== 'None');
+
+  return {
+    hasCondition: hasLegacyCondition,
+    conditionType: hasLegacyCondition ? 'long_covid' : '',
+    conditionOnsetDate: data.covidDate || '',
+    conditionDuration: data.covidDuration || '',
+    conditionSeverity: legacySeverity || '',
+  };
+};
+
+const PersonalSettings = () => {
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [userData, setUserData] = useState(null);
+  const [showPasswordSection, setShowPasswordSection] = useState(false);
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
+  const [showDeletePasswordConfirmation, setShowDeletePasswordConfirmation] = useState(false);
+  const [showDeletePassword, setShowDeletePassword] = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
+
+  const [formData, setFormData] = useState({
+    name: '',
+    email: '',
+    age: '',
+    gender: '',
+    unitSystem: 'metric',
+    weight: '',
+    height: '',
+    heightFeet: '',
+    heightInches: '',
+    hasCondition: false,
+    conditionType: '',
+    conditionOnsetDate: '',
+    conditionDuration: '',
+    conditionSeverity: '',
+    symptoms: [],
+    medicalConditions: '',
+    remindersEnabled: false,
+  });
+
+  const [passwordData, setPasswordData] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  });
+
+  const [errors, setErrors] = useState({});
+  const [successMessage, setSuccessMessage] = useState('');
+
+  // Floating labels
+  useEffect(() => {
+    const inputs = document.querySelectorAll('input, select, textarea');
+
+    const setupInput = (input) => {
+      const formGroup = input.closest('.form-group');
+      const label = formGroup?.querySelector('.form-label');
+      if (!label || !formGroup) return null;
+
+      const update = () => {
+        const hasValue = input.value && input.value.length > 0;
+        const isFocused = document.activeElement === input;
+        if (hasValue || isFocused) { label.classList.add('floating'); formGroup.classList.add('has-content'); }
+        else { label.classList.remove('floating'); formGroup.classList.remove('has-content'); }
+      };
+      update();
+
+      const onFocus = () => { try { formGroup.style.transform = 'scale(1.02)'; label.classList.add('floating'); formGroup.classList.add('focused'); update(); } catch (e) {} };
+      const onBlur = () => { try { formGroup.style.transform = 'scale(1)'; formGroup.classList.remove('focused'); update(); } catch (e) {} };
+      const onInput = () => { try { update(); } catch (e) {} };
+
+      input.addEventListener('focus', onFocus);
+      input.addEventListener('blur', onBlur);
+      input.addEventListener('input', onInput);
+      return { input, handlers: { onFocus, onBlur, onInput } };
+    };
+
+    const inputHandlers = [];
+    inputs.forEach(input => {
+      try {
+        const result = setupInput(input);
+        if (result) inputHandlers.push(result);
+      } catch (e) {}
+    });
+
+    return () => {
+      inputHandlers.forEach(({ input, handlers }) => {
+        try {
+          input.removeEventListener('focus', handlers.onFocus);
+          input.removeEventListener('blur', handlers.onBlur);
+          input.removeEventListener('input', handlers.onInput);
+        } catch (e) {}
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    const inputs = document.querySelectorAll('input, select, textarea');
+    inputs.forEach(input => {
+      try {
+        const formGroup = input.closest('.form-group');
+        const label = formGroup?.querySelector('.form-label');
+        if (label && formGroup) {
+          if (input.value && input.value.length > 0) { label.classList.add('floating'); formGroup.classList.add('has-content'); }
+          else { label.classList.remove('floating'); formGroup.classList.remove('has-content'); }
+        }
+      } catch (e) {}
+    });
+  }, [formData]);
+
+  const loadUserData = useCallback(async () => {
+    try {
+      const storedUserData = localStorage.getItem('userData');
+      if (!storedUserData) { navigate('/login'); return; }
+
+      const parsedUserData = JSON.parse(storedUserData);
+
+      if (parsedUserData.id) {
+        const userDocRef = doc(db, 'users', parsedUserData.id);
+        const userDocSnap = await getDoc(userDocRef);
+
+        if (userDocSnap.exists()) {
+          const data = userDocSnap.data();
+          setUserData({ id: parsedUserData.id, ...data });
+
+          const userUnitSystem = data.unitSystem || 'metric';
+
+          let displayWeight = data.weight || '';
+          let displayHeight = data.height || '';
+          let displayHeightFeet = '';
+          let displayHeightInches = '';
+
+          if (userUnitSystem === 'imperial') {
+            if (data.weight) displayWeight = Math.round(convertWeight.kgToLbs(data.weight) * 10) / 10;
+            if (data.height) {
+              const { feet, inches } = convertHeight.cmToFeetInches(data.height);
+              displayHeightFeet = feet;
+              displayHeightInches = inches;
+              displayHeight = '';
+            }
+          }
+
+          // Normalize condition fields — handles both old and new Firestore format
+          const condition = detectConditionFromFirestore(data);
+
+          setFormData({
+            name: data.name || '',
+            email: data.email || '',
+            age: data.age || '',
+            gender: data.gender || '',
+            unitSystem: userUnitSystem,
+            weight: displayWeight,
+            height: displayHeight,
+            heightFeet: displayHeightFeet,
+            heightInches: displayHeightInches,
+            ...condition,
+            symptoms: data.symptoms || [],
+            medicalConditions: data.medicalConditions || '',
+            remindersEnabled: !!data.remindersEnabled,
+          });
+        } else {
+          navigate('/login');
+        }
+      }
+    } catch (error) {
+      console.error('Error loading user data:', error);
+      navigate('/login');
+    } finally {
+      setLoading(false);
+    }
+  }, [navigate]);
+
+  useEffect(() => { loadUserData(); }, [loadUserData]);
+
+  const handleLogout = async () => {
+    try {
+      if (auth.currentUser) await signOut(auth);
+      localStorage.removeItem('userData');
+      sessionStorage.clear();
+      setUserData(null);
+      navigate('/login', { replace: true });
+    } catch (error) {
+      localStorage.removeItem('userData');
+      sessionStorage.clear();
+      setUserData(null);
+      navigate('/login', { replace: true });
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!deletePassword.trim()) {
+      setErrors({ deletePassword: 'Password is required for account deletion' });
+      return;
+    }
+    setDeleting(true);
+    setErrors({});
+
+    try {
+      const user = auth.currentUser;
+      if (!user) throw new Error('No authenticated user found');
+
+      const credential = EmailAuthProvider.credential(user.email, deletePassword);
+      await reauthenticateWithCredential(user, credential);
+
+      const userId = userData.id;
+      await deleteDoc(doc(db, 'users', userId));
+
+      const foodLogsQuery = query(collection(db, 'foodLogs'), where('userId', '==', userId));
+      const foodLogsSnapshot = await getDocs(foodLogsQuery);
+      const batch = writeBatch(db);
+      foodLogsSnapshot.docs.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+
+      await deleteUser(user);
+      localStorage.removeItem('userData');
+      sessionStorage.clear();
+      navigate('/login', { replace: true });
+
+    } catch (error) {
+      if (error.code === 'auth/wrong-password') setErrors({ deletePassword: 'Incorrect password' });
+      else if (error.code === 'auth/too-many-requests') setErrors({ deletePassword: 'Too many failed attempts. Please try again later.' });
+      else setErrors({ deletePassword: 'Failed to delete account. Please try again.' });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleInputChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    if (name === 'symptoms') {
+      setFormData(prev => ({
+        ...prev,
+        symptoms: checked ? [...prev.symptoms, value] : prev.symptoms.filter(s => s !== value),
+      }));
+    } else if (type === 'checkbox') {
+      setFormData(prev => ({ ...prev, [name]: checked }));
+    } else {
+      setFormData(prev => ({ ...prev, [name]: value }));
+    }
+    if (errors[name]) setErrors(prev => ({ ...prev, [name]: '' }));
+    setSuccessMessage('');
+  };
+
+  const handlePasswordChange = (e) => {
+    const { name, value } = e.target;
+    setPasswordData(prev => ({ ...prev, [name]: value }));
+    if (errors[name]) setErrors(prev => ({ ...prev, [name]: '' }));
+  };
+
+  const handleUnitSystemChange = (e) => {
+    const newSystem = e.target.value;
+    const oldSystem = formData.unitSystem;
+    let updatedData = { unitSystem: newSystem };
+
+    if (formData.weight) {
+      if (oldSystem === 'metric' && newSystem === 'imperial') updatedData.weight = Math.round(convertWeight.kgToLbs(parseFloat(formData.weight)) * 10) / 10;
+      else if (oldSystem === 'imperial' && newSystem === 'metric') updatedData.weight = Math.round(convertWeight.lbsToKg(parseFloat(formData.weight)) * 10) / 10;
+    }
+
+    if (newSystem === 'imperial' && formData.height) {
+      const { feet, inches } = convertHeight.cmToFeetInches(parseFloat(formData.height));
+      updatedData.heightFeet = feet; updatedData.heightInches = inches; updatedData.height = '';
+    } else if (newSystem === 'metric' && (formData.heightFeet || formData.heightInches)) {
+      const feet = parseFloat(formData.heightFeet) || 0;
+      const inches = parseFloat(formData.heightInches) || 0;
+      updatedData.height = Math.round(convertHeight.feetInchesToCm(feet, inches));
+      updatedData.heightFeet = ''; updatedData.heightInches = '';
+    }
+
+    setFormData(prev => ({ ...prev, ...updatedData }));
+    setSuccessMessage('');
+  };
+
+  const handleSaveChanges = async () => {
+    const newErrors = {};
+    if (!formData.name.trim()) newErrors.name = 'Name is required';
+    if (!formData.age) newErrors.age = 'Age is required';
+    else if (formData.age < 13) newErrors.age = 'Age must be at least 13';
+    if (!formData.gender) newErrors.gender = 'Gender is required';
+
+    if (Object.keys(newErrors).length > 0) { setErrors(newErrors); return; }
+
+    setSaving(true);
+    setErrors({});
+
+    try {
+      let weightInKg = formData.weight ? parseFloat(formData.weight) : null;
+      let heightInCm = formData.height ? parseFloat(formData.height) : null;
+
+      if (formData.unitSystem === 'imperial') {
+        if (weightInKg) weightInKg = convertWeight.lbsToKg(weightInKg);
+        if (formData.heightFeet || formData.heightInches) {
+          const feet = parseFloat(formData.heightFeet) || 0;
+          const inches = parseFloat(formData.heightInches) || 0;
+          heightInCm = convertHeight.feetInchesToCm(feet, inches);
+        }
+      }
+
+      const isLongCovid = formData.hasCondition && formData.conditionType === 'long_covid';
+
+      const updatedData = {
+        name: formData.name,
+        age: parseInt(formData.age),
+        gender: formData.gender,
+        unitSystem: formData.unitSystem,
+        weight: weightInKg ? Math.round(weightInKg * 10) / 10 : null,
+        height: heightInCm ? Math.round(heightInCm) : null,
+
+        // --- Generic condition fields (new) ---
+        hasCondition: formData.hasCondition,
+        conditionType: formData.hasCondition ? (formData.conditionType || null) : null,
+        conditionOnsetDate: formData.hasCondition ? (formData.conditionOnsetDate || null) : null,
+        conditionDuration: formData.hasCondition ? (formData.conditionDuration || null) : null,
+        conditionSeverity: formData.hasCondition ? (formData.conditionSeverity || null) : null,
+
+        // --- Legacy Long COVID fields — kept so FoodTrackerAnalysis still works ---
+        hasLongCovid: isLongCovid,
+        covidDate: isLongCovid ? (formData.conditionOnsetDate || null) : null,
+        covidDuration: isLongCovid ? (formData.conditionDuration || null) : null,
+        severity: isLongCovid ? (formData.conditionSeverity || null) : null,
+        covid_severity: isLongCovid ? (formData.conditionSeverity || null) : null,
+        longCovidSeverity: isLongCovid ? (formData.conditionSeverity || null) : null,
+
+        symptoms: formData.symptoms,
+        medicalConditions: formData.medicalConditions || null,
+        // Email reminders (see reminders/send-reminders.mjs). The time zone tells the reminder job
+        // what "12:30 pm" means for this person.
+        remindersEnabled: !!formData.remindersEnabled,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || null,
+        updatedAt: new Date().toISOString(),
+      };
+
+      await updateDoc(doc(db, 'users', userData.id), updatedData);
+
+      const updatedUserData = { id: userData.id, email: userData.email, ...updatedData };
+      localStorage.setItem('userData', JSON.stringify(updatedUserData));
+      setUserData(updatedUserData);
+
+      setSuccessMessage('Profile updated successfully!');
+      setTimeout(() => setSuccessMessage(''), 3000);
+
+    } catch (error) {
+      console.error('Error updating profile:', error);
+      setErrors({ submit: 'Failed to update profile. Please try again.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleChangePassword = async () => {
+    const newErrors = {};
+    if (!passwordData.currentPassword) newErrors.currentPassword = 'Current password is required';
+    if (!passwordData.newPassword) newErrors.newPassword = 'New password is required';
+    else if (passwordData.newPassword.length < 6) newErrors.newPassword = 'Password must be at least 6 characters';
+    if (passwordData.newPassword !== passwordData.confirmPassword) newErrors.confirmPassword = 'Passwords do not match';
+
+    if (Object.keys(newErrors).length > 0) { setErrors(newErrors); return; }
+
+    setSaving(true);
+    setErrors({});
+
+    try {
+      const user = auth.currentUser;
+      const credential = EmailAuthProvider.credential(user.email, passwordData.currentPassword);
+      await reauthenticateWithCredential(user, credential);
+      await updatePassword(user, passwordData.newPassword);
+      setPasswordData({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      setShowPasswordSection(false);
+      setSuccessMessage('Password changed successfully!');
+      setTimeout(() => setSuccessMessage(''), 3000);
+    } catch (error) {
+      if (error.code === 'auth/wrong-password') setErrors({ currentPassword: 'Current password is incorrect' });
+      else setErrors({ submit: 'Failed to change password. Please try again.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="personal-settings-page">
+        <div className="loading-container">
+          <div className="loading-spinner"></div>
+          <p>Loading settings...</p>
+        </div>
+      </div>
+    );
+  }
+
+  const isLongCovidUser = formData.hasCondition && formData.conditionType === 'long_covid';
+
+  return (
+    <div className="personal-settings-page">
+      <div className="settings-container">
+        <div className="settings-header">
+          <button onClick={() => navigate('/')} className="back-button">
+            <ArrowLeft className="back-icon" />Back to Dashboard
+          </button>
+          <h1 className="settings-title">Personal Settings</h1>
+          <p className="settings-subtitle">Manage your account and preferences</p>
+        </div>
+
+        {successMessage && (
+          <div className="success-message-banner">
+            <Check className="success-icon" />{successMessage}
+          </div>
+        )}
+
+        {/* ── Profile Information ── */}
+        <div className="settings-card">
+          <div className="card-header">
+            <h2 className="card-title">Profile Information</h2>
+            <p className="card-subtitle">Update your personal details</p>
+          </div>
+
+          <div className="form-sections">
+            <div className="form-group">
+              <User className="form-label-icon" />
+              <input type="text" name="name" value={formData.name} onChange={handleInputChange}
+                className={`form-input ${errors.name ? 'error' : ''}`} placeholder="Your full name" />
+              <label className="form-label">Full Name *</label>
+              {errors.name && <p className="error-message">{errors.name}</p>}
+            </div>
+
+            <div className="form-group">
+              <Mail className="form-label-icon" />
+              <input type="email" value={formData.email} className="form-input"
+                placeholder="your@email.com" disabled />
+              <label className="form-label">Email Address</label>
+              <p className="field-note">Email cannot be changed</p>
+            </div>
+
+            <div className="form-grid two-cols">
+              <div className="form-group">
+                <input type="number" name="age" value={formData.age} onChange={handleInputChange}
+                  className={`form-input ${errors.age ? 'error' : ''}`}
+                  placeholder="Your age" min="13" max="120" />
+                <label className="form-label">Age *</label>
+                {errors.age && <p className="error-message">{errors.age}</p>}
+              </div>
+              <div className="form-group">
+                <select name="gender" value={formData.gender} onChange={handleInputChange}
+                  className={`form-select ${errors.gender ? 'error' : ''}`}>
+                  <option value="">Select gender</option>
+                  <option value="male">Male</option>
+                  <option value="female">Female</option>
+                  <option value="other">Other</option>
+                  <option value="prefer-not-to-say">Prefer not to say</option>
+                </select>
+                <label className="form-label">Gender *</label>
+                {errors.gender && <p className="error-message">{errors.gender}</p>}
+              </div>
+            </div>
+
+            <div className="form-group">
+              <select name="unitSystem" value={formData.unitSystem}
+                onChange={handleUnitSystemChange} className="form-select">
+                <option value="metric">Metric (kg, cm)</option>
+                <option value="imperial">Imperial (lbs, ft/in)</option>
+              </select>
+              <label className="form-label">Measurement System</label>
+            </div>
+
+            <div className="form-grid two-cols">
+              <div className="form-group">
+                <Scale className="form-label-icon" />
+                <input type="number" name="weight" value={formData.weight}
+                  onChange={handleInputChange} className="form-input"
+                  placeholder="Optional" step="0.1" />
+                <label className="form-label">Weight ({formData.unitSystem === 'metric' ? 'kg' : 'lbs'})</label>
+              </div>
+
+              {formData.unitSystem === 'metric' ? (
+                <div className="form-group">
+                  <Ruler className="form-label-icon" />
+                  <input type="number" name="height" value={formData.height}
+                    onChange={handleInputChange} className="form-input" placeholder="Optional" />
+                  <label className="form-label">Height (cm)</label>
+                </div>
+              ) : (
+                <div className="form-group height-imperial-group">
+                  <Ruler className="form-label-icon" />
+                  <div className="height-imperial-inputs">
+                    <input type="number" name="heightFeet" value={formData.heightFeet}
+                      onChange={handleInputChange} className="form-input height-feet"
+                      placeholder="Feet" min="0" max="8" />
+                    <span className="height-separator">ft</span>
+                    <input type="number" name="heightInches" value={formData.heightInches}
+                      onChange={handleInputChange} className="form-input height-inches"
+                      placeholder="In" min="0" max="11" />
+                    <span className="height-separator">in</span>
+                  </div>
+                  <label className="form-label floating">Height</label>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Health Information ── */}
+        <div className="settings-card">
+          <div className="card-header">
+            <h2 className="card-title">Health Information</h2>
+            <p className="card-subtitle">Update your health profile and condition details</p>
+          </div>
+
+          <div className="form-sections">
+
+            {/* Condition Toggle */}
+            <div className="condition-toggle-section">
+              <label className="condition-toggle-label">
+                <input type="checkbox" name="hasCondition" checked={formData.hasCondition}
+                  onChange={handleInputChange} className="condition-toggle-checkbox" />
+                <span className="condition-toggle-text">
+                  I have a chronic health condition
+                </span>
+              </label>
+              <p className="condition-toggle-hint">
+                Enables condition-aware nutrient targets, symptom tracking, and food recommendations.
+              </p>
+            </div>
+
+            {/* Condition Details — conditional */}
+            {formData.hasCondition && (
+              <div className="condition-details-section">
+                <div className="form-group">
+                  <select name="conditionType" value={formData.conditionType}
+                    onChange={handleInputChange} className="form-select">
+                    <option value="">Select your condition</option>
+                    {CONDITION_TYPES.map(ct => (
+                      <option key={ct.value} value={ct.value}>{ct.label}</option>
+                    ))}
+                  </select>
+                  <label className="form-label">Condition Type</label>
+                </div>
+
+                <div className="form-grid two-cols">
+                  <div className="form-group">
+                    <Calendar className="form-label-icon" />
+                    <input type="date" name="conditionOnsetDate"
+                      value={formData.conditionOnsetDate}
+                      onChange={handleInputChange} className="form-input" />
+                    <label className="form-label">
+                      {isLongCovidUser ? 'First COVID Date' : 'Condition Onset Date'}
+                    </label>
+                  </div>
+
+                  <div className="form-group">
+                    <select name="conditionDuration" value={formData.conditionDuration}
+                      onChange={handleInputChange} className="form-select">
+                      <option value="">Select duration</option>
+                      <option value="less-than-1-month">Less than 1 month</option>
+                      <option value="1-3-months">1–3 months</option>
+                      <option value="3-6-months">3–6 months</option>
+                      <option value="6-12-months">6–12 months</option>
+                      <option value="1-2-years">1–2 years</option>
+                      <option value="more-than-2-years">More than 2 years</option>
+                    </select>
+                    <label className="form-label">
+                      {isLongCovidUser ? 'Long COVID Duration' : 'Condition Duration'}
+                    </label>
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <select name="conditionSeverity" value={formData.conditionSeverity}
+                    onChange={handleInputChange} className="form-select">
+                    <option value="">Select severity</option>
+                    <option value="mild">Mild</option>
+                    <option value="moderate">Moderate</option>
+                    <option value="severe">Severe</option>
+                    <option value="very-severe">Very Severe</option>
+                  </select>
+                  <label className="form-label">Condition Severity</label>
+                </div>
+              </div>
+            )}
+
+            {/* Symptoms */}
+            <div className="symptoms-section">
+              <label className="form-label">
+                Current symptoms (select all that apply)
+              </label>
+              <div className="symptoms-grid">
+                {symptomOptions.map((symptom) => (
+                  <label key={symptom}
+                    className={`symptom-checkbox ${formData.symptoms.includes(symptom) ? 'selected' : ''}`}>
+                    <input type="checkbox" name="symptoms" value={symptom}
+                      checked={formData.symptoms.includes(symptom)}
+                      onChange={handleInputChange} className="symptom-checkbox-input" />
+                    <span className="symptom-checkbox-text">{symptom}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="form-group">
+              <textarea name="medicalConditions" value={formData.medicalConditions}
+                onChange={handleInputChange} className="form-textarea"
+                placeholder="Any other medical conditions or notes..."
+                rows="4" />
+              <label className="form-label">Additional health notes</label>
+            </div>
+
+            {/* Email reminders */}
+            <div className="condition-toggle-section">
+              <label className="condition-toggle-label">
+                <input type="checkbox" name="remindersEnabled" checked={!!formData.remindersEnabled}
+                  onChange={handleInputChange} className="condition-toggle-checkbox" />
+                <span className="condition-toggle-text">
+                  Email me if I forget to log a food I usually eat
+                </span>
+              </label>
+              <p className="condition-toggle-hint">
+                Based on your own food journal, e.g. &ldquo;You usually have tomatoes around 12:30 &mdash; did you have
+                them today?&rdquo; You can turn this off at any time. Press Save Changes to apply.
+              </p>
+            </div>
+          </div>
+
+          <div className="card-actions">
+            <button onClick={handleSaveChanges} className="btn btn-primary" disabled={saving}>
+              {saving ? (
+                <><div className="loading-spinner"></div>Saving...</>
+              ) : (
+                <><Save className="btn-icon" />Save Changes</>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* ── Security Settings ── */}
+        <div className="settings-card">
+          <div className="card-header">
+            <h2 className="card-title">Security Settings</h2>
+            <p className="card-subtitle">Manage your password and account security</p>
+          </div>
+
+          {!showPasswordSection ? (
+            <button onClick={() => setShowPasswordSection(true)} className="btn btn-secondary">
+              <Lock className="btn-icon" />Change Password
+            </button>
+          ) : (
+            <div className="password-section">
+              <div className="form-sections">
+                {[
+                  { name: 'currentPassword', label: 'Current Password', show: showCurrentPassword, toggle: () => setShowCurrentPassword(!showCurrentPassword) },
+                  { name: 'newPassword', label: 'New Password', show: showNewPassword, toggle: () => setShowNewPassword(!showNewPassword) },
+                  { name: 'confirmPassword', label: 'Confirm New Password', show: showConfirmPassword, toggle: () => setShowConfirmPassword(!showConfirmPassword) },
+                ].map(({ name, label, show, toggle }) => (
+                  <div className="form-group" key={name}>
+                    <Lock className="form-label-icon" />
+                    <input type={show ? 'text' : 'password'} name={name}
+                      value={passwordData[name]} onChange={handlePasswordChange}
+                      className={`form-input ${errors[name] ? 'error' : ''}`}
+                      placeholder={`Enter ${label.toLowerCase()}`} />
+                    <label className="form-label">{label}</label>
+                    <button type="button" onClick={toggle} className="password-toggle">
+                      {show ? <EyeOff size={18} /> : <Eye size={18} />}
+                    </button>
+                    {errors[name] && <p className="error-message">{errors[name]}</p>}
+                  </div>
+                ))}
+              </div>
+              <div className="card-actions">
+                <button onClick={() => { setShowPasswordSection(false); setPasswordData({ currentPassword: '', newPassword: '', confirmPassword: '' }); setErrors({}); }}
+                  className="btn btn-secondary">Cancel</button>
+                <button onClick={handleChangePassword} className="btn btn-primary" disabled={saving}>
+                  {saving ? <><div className="loading-spinner"></div>Updating...</> : <><Check className="btn-icon" />Update Password</>}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── Account Actions ── */}
+        <div className="settings-card danger-zone">
+          <div className="card-header">
+            <h2 className="card-title">Account Actions</h2>
+            <p className="card-subtitle">Logout or permanently delete your account</p>
+          </div>
+
+          <div className="header-actions">
+            <button onClick={handleLogout} className="btn btn-secondary">
+              <LogOut className="btn-icon" />Logout
+            </button>
+
+            {!showDeleteConfirmation ? (
+              <button onClick={() => setShowDeleteConfirmation(true)} className="btn btn-danger">
+                <Trash2 className="btn-icon" />Delete Account
+              </button>
+            ) : (
+              <div className="danger-confirmation">
+                <h3 className="danger-confirmation-title">
+                  <AlertTriangle className="btn-icon" />Delete Account
+                </h3>
+                <p className="danger-confirmation-text">
+                  This action cannot be undone. All your data, including food logs and personal information, will be permanently deleted.
+                </p>
+
+                {!showDeletePasswordConfirmation ? (
+                  <div className="danger-actions">
+                    <button onClick={() => setShowDeleteConfirmation(false)} className="btn btn-secondary">Cancel</button>
+                    <button onClick={() => setShowDeletePasswordConfirmation(true)} className="btn btn-danger">
+                      I Understand, Delete My Account
+                    </button>
+                  </div>
+                ) : (
+                  <div className="delete-password-section">
+                    <div className="form-group">
+                      <Lock className="form-label-icon" />
+                      <input type={showDeletePassword ? 'text' : 'password'}
+                        value={deletePassword}
+                        onChange={(e) => { setDeletePassword(e.target.value); if (errors.deletePassword) setErrors(prev => ({ ...prev, deletePassword: '' })); }}
+                        className={`form-input ${errors.deletePassword ? 'error' : ''}`}
+                        placeholder="Enter your password to confirm" />
+                      <label className="form-label">Confirm Password</label>
+                      <button type="button" onClick={() => setShowDeletePassword(!showDeletePassword)} className="password-toggle">
+                        {showDeletePassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                      </button>
+                      {errors.deletePassword && <p className="error-message">{errors.deletePassword}</p>}
+                    </div>
+                    <div className="danger-actions">
+                      <button onClick={() => { setShowDeletePasswordConfirmation(false); setDeletePassword(''); setErrors({}); }}
+                        className="btn btn-secondary">Cancel</button>
+                      <button onClick={handleDeleteAccount} className="btn btn-danger" disabled={deleting}>
+                        {deleting ? <><div className="loading-spinner"></div>Deleting...</> : <><Trash2 className="btn-icon" />Permanently Delete Account</>}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <style jsx>{`
+        .condition-toggle-section {
+          padding: 1rem;
+          background: var(--gray-50, #f9fafb);
+          border-radius: 8px;
+          border: 1px solid var(--gray-200, #e5e7eb);
+          margin-bottom: 1rem;
+        }
+        .condition-toggle-label {
+          display: flex;
+          align-items: center;
+          gap: 0.75rem;
+          cursor: pointer;
+          font-weight: 500;
+        }
+        .condition-toggle-checkbox {
+          width: 1.1rem;
+          height: 1.1rem;
+          cursor: pointer;
+        }
+        .condition-toggle-hint {
+          margin: 0.5rem 0 0 1.85rem;
+          font-size: 0.8rem;
+          color: var(--gray-500, #6b7280);
+        }
+        .condition-details-section {
+          padding: 1rem;
+          background: var(--blue-50, #eff6ff);
+          border-radius: 8px;
+          border: 1px solid var(--blue-200, #bfdbfe);
+          margin-bottom: 1rem;
+        }
+        .height-imperial-group { position: relative; }
+        .height-imperial-inputs { display: flex; align-items: center; gap: 0.5rem; }
+        .height-imperial-inputs .form-input { flex: 1; min-width: 0; }
+        .height-separator { color: var(--gray-600); font-size: 0.875rem; font-weight: 500; }
+        .height-feet { flex: 1.2 !important; }
+        .height-inches { flex: 0.8 !important; }
+        .field-note { font-size: 0.75rem; color: var(--gray-500); margin-top: 0.25rem; font-style: italic; }
+      `}</style>
+    </div>
+  );
+};
+
+export default PersonalSettings;
