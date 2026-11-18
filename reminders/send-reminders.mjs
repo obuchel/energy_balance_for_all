@@ -49,8 +49,9 @@ const MAX_EMAILS_PER_DAY = 2;
 
 // ── Email content ─────────────────────────────────────────────────────────────
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// params: an object, or an array of [key, value] pairs (needed to repeat food= / meal= for several foods)
 const link = (path, params = {}) => {
-  const q = new URLSearchParams(params).toString();
+  const q = new URLSearchParams(Array.isArray(params) ? params : Object.entries(params)).toString();
   return `${APP_URL}${path}${q ? `?${q}` : ''}`;
 };
 
@@ -67,22 +68,38 @@ export function composeEmail({ name, due }) {
     when: fmtMin(h.typicalMin),
   }));
 
+  const many = items.length > 1;
+  // One link for all foods (repeated food=/meal= pairs). Adding review=1 opens a checklist instead of logging at once.
+  const pairs = items.flatMap((h) => [['food', h.name], ['meal', h.mealType]]);
+  const logAllUrl = link('/quick-log', pairs);
+  const reviewUrl = link('/quick-log', [...pairs, ['review', '1']]);
+
   const text = [
     hi, '',
-    due.length === 1
-      ? `You usually have ${due[0].name} around ${items[0].when}, but it isn't in your journal yet today.`
-      : 'These usual foods are not in your journal yet today:',
-    ...items.map((h) => `- ${h.name} (usually around ${h.when}): log it -> ${h.logUrl}`),
+    many
+      ? 'These usual foods are not in your journal yet today:'
+      : `You usually have ${due[0].name} around ${items[0].when}, but it isn't in your journal yet today.`,
+    ...items.map((h) => (many
+      ? `- ${h.name} (usually around ${h.when})`
+      : `- ${h.name} (usually around ${h.when}): log it -> ${h.logUrl}`)),
+    ...(many ? ['', `Log all ${items.length}: ${logAllUrl}`, `Choose which ones: ${reviewUrl}`] : []),
     '', `Open the app: ${link('/food-tracker')}`,
     '', `You get these because reminders are turned on in Settings: ${link('/personal-settings')}`,
   ].join('\n');
 
+  const btnStyle = 'background:#3b6ef5;color:#fff;text-decoration:none;padding:9px 16px;border-radius:8px;font-size:14px;display:inline-block';
   const rows = items.map((h) => `
     <tr><td style="padding:12px 0;border-bottom:1px solid #eef0f6">
       <div style="font-size:16px;color:#1b2559"><strong>${esc(h.name)}</strong></div>
-      <div style="font-size:13px;color:#6b7280;margin:2px 0 10px">Usually around ${esc(h.when)} &middot; ${esc(h.mealType)}</div>
-      <a href="${esc(h.logUrl)}" style="background:#3b6ef5;color:#fff;text-decoration:none;padding:9px 16px;border-radius:8px;font-size:14px;display:inline-block">Yes, log it</a>
+      <div style="font-size:13px;color:#6b7280;margin:2px 0 ${many ? '0' : '10px'}">Usually around ${esc(h.when)} &middot; ${esc(h.mealType)}</div>
+      ${many ? '' : `<a href="${esc(h.logUrl)}" style="${btnStyle}">Yes, log it</a>`}
     </td></tr>`).join('');
+
+  const actions = many ? `
+    <div style="padding:16px 0 0">
+      <a href="${esc(logAllUrl)}" style="${btnStyle}">Yes, log all ${items.length}</a>
+      <a href="${esc(reviewUrl)}" style="color:#3b6ef5;font-size:14px;margin-left:14px;white-space:nowrap">Choose which ones</a>
+    </div>` : '';
 
   const html = `<!doctype html><html><body style="margin:0;background:#f4f6fb;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif">
   <div style="max-width:520px;margin:0 auto;padding:24px">
@@ -92,6 +109,7 @@ export function composeEmail({ name, due }) {
         ? 'This usual food isn’t in your journal yet today. Did you have it?'
         : 'These usual foods aren’t in your journal yet today. Did you have them?'}</p>
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0">${rows}</table>
+      ${actions}
       <p style="font-size:13px;color:#6b7280;margin:16px 0 0">Not today? Just ignore this email, or <a href="${esc(link('/food-tracker'))}" style="color:#3b6ef5">open the app</a> to log something else.</p>
     </div>
     <p style="font-size:12px;color:#9ca3af;text-align:center;margin:14px 0 0">You receive these because reminders are on in your
