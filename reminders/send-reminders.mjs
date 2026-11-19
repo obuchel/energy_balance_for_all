@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 /**
- * send-reminders.mjs - email people who usually log a food around now but haven't today.
+ * send-reminders.mjs - email people when a meal they regularly log is missing from today's journal.
+ *
+ * It learns each person's meal schedule from the last 30 days (e.g. Breakfast ~07:35, Lunch ~12:40,
+ * Dinner ~18:30; weekdays and weekends learned separately). Once a regular meal is 45 minutes past its usual
+ * time and nothing has been logged for it, the person gets one email for that meal (at most once per meal per
+ * day, up to 3 hours after the usual time). The email offers the foods they usually have at that meal.
  *
  * Run on a schedule (see .github/workflows/reminders.yml) or by hand:
  *   node reminders/send-reminders.mjs --dry-run                       # real data, prints emails, sends nothing
  *   node reminders/send-reminders.mjs --dry-run --now 2026-11-18T14:00   # pretend it is 2:00 pm (user's local time)
  *   node reminders/send-reminders.mjs --demo preview.json --now 2026-11-17T09:30
- *        # no Firebase needed: uses entries from `seed-food-journal.mjs --dry-run --out preview.json`
+ *        # no Firebase needed: uses entries from a JSON file (e.g. `seed-food-journal.mjs --dry-run --out preview.json`)
  *
  * Who gets emails: only users whose profile has remindersEnabled == true (the Settings toggle),
  * and, if REMINDER_ALLOWED_EMAILS is set, only addresses on that comma-separated list (use it while testing).
@@ -25,7 +30,7 @@
  */
 
 import fs from 'node:fs';
-import { detectHabits, localNow, zonedToDate, addDays, fmtMin } from './habits.mjs';
+import { detectMeals, localNow, zonedToDate, addDays, fmtMin } from './habits.mjs';
 
 const argv = process.argv.slice(2);
 const flag = (n) => argv.includes(`--${n}`);
@@ -45,7 +50,7 @@ const APP_URL = (process.env.APP_URL || 'https://obuchel.github.io/energy_balanc
 const FROM = process.env.REMINDER_FROM || 'Energy Balance <onboarding@resend.dev>';
 const ALLOWED = (process.env.REMINDER_ALLOWED_EMAILS || '')
   .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-const MAX_EMAILS_PER_DAY = 2;
+const MAX_EMAILS_PER_DAY = 6;
 
 // ── Email content ─────────────────────────────────────────────────────────────
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -55,61 +60,82 @@ const link = (path, params = {}) => {
   return `${APP_URL}${path}${q ? `?${q}` : ''}`;
 };
 
-export function composeEmail({ name, due }) {
+const mealWord = (m) => m.mealType.toLowerCase();
+const mealPhrase = (m) => (/snack/i.test(m.mealType) ? `your ${mealWord(m)}` : mealWord(m)); // "breakfast", "your afternoon snack"
+
+/**
+ * One email covering every meal that is due.
+ *   - "Yes, log these N":   logs the foods usually eaten at that meal (those eaten on at least half its days)
+ *   - "Choose which ones":  checklist page: usual foods ticked, other foods seen at that meal unticked
+ */
+export function composeMealEmail({ name, meals }) {
   const first = (name || '').split(' ')[0];
   const hi = first ? `Hi ${esc(first)},` : 'Hi,';
-  const subject = due.length === 1
-    ? `Did you have your ${due[0].name.split(',')[0].toLowerCase()} today?`
-    : 'Did you forget to log something today?';
+  const subject = meals.length === 1
+    ? `Did you have ${mealPhrase(meals[0])} today?`
+    : 'Did you forget to log a meal today?';
 
-  const items = due.map((h) => ({
-    ...h,
-    logUrl: link('/quick-log', { food: h.name, meal: h.mealType }),
-    when: fmtMin(h.typicalMin),
-  }));
-
-  const many = items.length > 1;
-  // One link for all foods (repeated food=/meal= pairs). Adding review=1 opens a checklist instead of logging at once.
-  const pairs = items.flatMap((h) => [['food', h.name], ['meal', h.mealType]]);
-  const logAllUrl = link('/quick-log', pairs);
-  const reviewUrl = link('/quick-log', [...pairs, ['review', '1']]);
+  const sections = meals.map((m) => {
+    const staples = m.usual.filter((f) => f.staple);
+    const others = m.usual.filter((f) => !f.staple);
+    const when = fmtMin(m.typicalMin);
+    const logUrl = staples.length
+      ? link('/quick-log', staples.flatMap((f) => [['food', f.name], ['meal', m.mealType]]))
+      : null;
+    const reviewUrl = m.usual.length
+      ? link('/quick-log', [
+        ...m.usual.flatMap((f) => [['food', f.name], ['meal', m.mealType], ['pre', f.staple ? '1' : '0']]),
+        ['review', '1'],
+      ])
+      : null;
+    return { m, staples, others, when, logUrl, reviewUrl };
+  });
 
   const text = [
     hi, '',
-    many
-      ? 'These usual foods are not in your journal yet today:'
-      : `You usually have ${due[0].name} around ${items[0].when}, but it isn't in your journal yet today.`,
-    ...items.map((h) => (many
-      ? `- ${h.name} (usually around ${h.when})`
-      : `- ${h.name} (usually around ${h.when}): log it -> ${h.logUrl}`)),
-    ...(many ? ['', `Log all ${items.length}: ${logAllUrl}`, `Choose which ones: ${reviewUrl}`] : []),
-    '', `Open the app: ${link('/food-tracker')}`,
+    ...sections.flatMap((s) => [
+      `${s.m.mealType} isn't in your journal yet today (you usually have it around ${s.when}).`,
+      ...(s.staples.length ? [`Usually: ${s.staples.map((f) => f.name).join(', ')}`] : []),
+      ...(s.logUrl ? [`Yes, log ${s.staples.length > 1 ? `these ${s.staples.length}` : 'it'}: ${s.logUrl}`] : []),
+      ...(s.reviewUrl ? [`Choose what you had: ${s.reviewUrl}`] : []),
+      '',
+    ]),
+    `Open the app: ${link('/food-tracker')}`,
     '', `You get these because reminders are turned on in Settings: ${link('/personal-settings')}`,
   ].join('\n');
 
   const btnStyle = 'background:#3b6ef5;color:#fff;text-decoration:none;padding:9px 16px;border-radius:8px;font-size:14px;display:inline-block';
-  const rows = items.map((h) => `
-    <tr><td style="padding:12px 0;border-bottom:1px solid #eef0f6">
-      <div style="font-size:16px;color:#1b2559"><strong>${esc(h.name)}</strong></div>
-      <div style="font-size:13px;color:#6b7280;margin:2px 0 ${many ? '0' : '10px'}">Usually around ${esc(h.when)} &middot; ${esc(h.mealType)}</div>
-      ${many ? '' : `<a href="${esc(h.logUrl)}" style="${btnStyle}">Yes, log it</a>`}
-    </td></tr>`).join('');
-
-  const actions = many ? `
-    <div style="padding:16px 0 0">
-      <a href="${esc(logAllUrl)}" style="${btnStyle}">Yes, log all ${items.length}</a>
-      <a href="${esc(reviewUrl)}" style="color:#3b6ef5;font-size:14px;margin-left:14px;white-space:nowrap">Choose which ones</a>
-    </div>` : '';
+  const linkStyle = 'color:#3b6ef5;font-size:14px;white-space:nowrap';
+  const blocks = sections.map((s) => {
+    const foods = s.staples.length
+      ? `<div style="font-size:14px;color:#374151;margin:8px 0 0">Usually: ${s.staples.map((f) => esc(f.name)).join(' &middot; ')}</div>`
+      : '';
+    let actions;
+    if (s.logUrl) {
+      actions = `<a href="${esc(s.logUrl)}" style="${btnStyle}">Yes, log ${s.staples.length > 1 ? `these ${s.staples.length}` : 'it'}</a>`
+        + (s.reviewUrl ? `<a href="${esc(s.reviewUrl)}" style="${linkStyle};margin-left:14px">Choose which ones</a>` : '');
+    } else if (s.reviewUrl) {
+      actions = `<a href="${esc(s.reviewUrl)}" style="${btnStyle}">Choose what you had</a>`;
+    } else {
+      actions = `<a href="${esc(link('/food-tracker'))}" style="${btnStyle}">Open the app</a>`;
+    }
+    return `
+    <tr><td style="padding:14px 0;border-bottom:1px solid #eef0f6">
+      <div style="font-size:17px;color:#1b2559"><strong>${esc(s.m.mealType)}</strong></div>
+      <div style="font-size:13px;color:#6b7280;margin:2px 0 0">You usually have it around ${esc(s.when)}</div>
+      ${foods}
+      <div style="padding:12px 0 0">${actions}</div>
+    </td></tr>`;
+  }).join('');
 
   const html = `<!doctype html><html><body style="margin:0;background:#f4f6fb;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif">
   <div style="max-width:520px;margin:0 auto;padding:24px">
     <div style="background:#fff;border-radius:14px;padding:24px;box-shadow:0 2px 10px rgba(30,50,120,.08)">
       <p style="font-size:16px;color:#1b2559;margin:0 0 8px">${hi}</p>
-      <p style="font-size:15px;color:#374151;margin:0 0 8px">${due.length === 1
-        ? 'This usual food isn’t in your journal yet today. Did you have it?'
-        : 'These usual foods aren’t in your journal yet today. Did you have them?'}</p>
-      <table role="presentation" width="100%" cellspacing="0" cellpadding="0">${rows}</table>
-      ${actions}
+      <p style="font-size:15px;color:#374151;margin:0 0 8px">${meals.length === 1
+        ? `Nothing is in your journal for ${esc(mealPhrase(meals[0]))} yet today. Did you have it?`
+        : 'Nothing is in your journal yet for these meals today. Did you have them?'}</p>
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0">${blocks}</table>
       <p style="font-size:13px;color:#6b7280;margin:16px 0 0">Not today? Just ignore this email, or <a href="${esc(link('/food-tracker'))}" style="color:#3b6ef5">open the app</a> to log something else.</p>
     </div>
     <p style="font-size:12px;color:#9ca3af;text-align:center;margin:14px 0 0">You receive these because reminders are on in your
@@ -146,20 +172,23 @@ async function processUser({ uid, email, name, tz, entries, logRef, logData }) {
   const { iso: todayIso, minutes: nowMin } = localNow(nowDate, tz);
   const label = `${email || uid} [${tz}, ${todayIso} ${fmtMin(nowMin)}]`;
 
-  const { habits, due, skipped } = detectHabits(entries, { todayIso, nowMin });
-  if (skipped) { console.log(`- ${label}: no reminder (${skipped}); ${habits.length} habits known`); return 'skipped'; }
+  const { meals, due, skipped } = detectMeals(entries, { todayIso, nowMin });
+  const schedule = meals.length
+    ? meals.map((m) => `${m.mealType} ${fmtMin(m.typicalMin)}${m.covered ? ' (logged)' : ''}`).join(', ')
+    : 'none learned yet';
+  if (skipped) { console.log(`- ${label}: no reminder (${skipped}); meals: ${schedule}`); return 'skipped'; }
 
   const already = logData?.items || {};
-  const fresh = FORCE ? due : due.filter((h) => !already[h.key]);
+  const fresh = FORCE ? due : due.filter((m) => !already[m.key]);
   const emailsToday = logData?.emails || 0;
   if (!fresh.length) {
-    console.log(`- ${label}: ${due.length ? `${due.length} due but already reminded today` : 'nothing due'}`);
+    console.log(`- ${label}: ${due.length ? `${due.length} meal(s) due but already reminded today` : 'nothing due'}; meals: ${schedule}`);
     return 'none';
   }
   if (!FORCE && emailsToday >= MAX_EMAILS_PER_DAY) { console.log(`- ${label}: daily limit reached`); return 'limit'; }
 
-  const mail = composeEmail({ name, due: fresh });
-  console.log(`- ${label}: REMIND about ${fresh.map((h) => h.name).join(' | ')}`);
+  const mail = composeMealEmail({ name, meals: fresh });
+  console.log(`- ${label}: REMIND about ${fresh.map((m) => m.mealType).join(' | ')}; meals: ${schedule}`);
 
   if (DRY) {
     console.log(`    to: ${email}\n    subject: ${mail.subject}\n    ${mail.text.split('\n').join('\n    ')}`);
@@ -168,7 +197,7 @@ async function processUser({ uid, email, name, tz, entries, logRef, logData }) {
   await sendViaResend({ to: email, ...mail });
   const sentAt = new Date().toISOString();
   const items = { ...already };
-  for (const h of fresh) items[h.key] = sentAt;
+  for (const m of fresh) items[m.key] = sentAt;
   await logRef.set({ date: todayIso, emails: emailsToday + 1, items }, { merge: true });
   console.log('    sent.');
   return 'sent';

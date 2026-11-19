@@ -163,3 +163,101 @@ export function detectHabits(entries, ctx, options = {}) {
 
   return { habits, due, skipped: null };
 }
+
+// ── Meal-level habits ─────────────────────────────────────────────────────────
+// Foods change (rotating lunches) but the meal itself happens at a regular time. So instead of asking
+// "did you eat food X?", ask "did you have lunch?" and offer the foods usually eaten at that meal.
+
+export const MEAL_DEFAULTS = {
+  ...DEFAULTS,
+  minMealDays: 4,        // meal must appear on at least this many same-day-type days
+  minMealFreq: 0.6,      // ...and on at least this share of logged days
+  maxMealMadMin: 60,     // "regular time": median absolute deviation of the meal's first entry (minutes)
+  mealGraceMin: 45,      // wait this long past the usual meal time before nudging
+  mealMaxLateMin: 180,   // stop nudging this long after it
+  coverWindowMin: 60,    // any entry within this many minutes of the usual meal time counts as having logged it
+  stapleShare: 0.5,      // a food eaten at >= half of this meal's days is a "usual" food for it
+  maxStaples: 5,
+  maxOthers: 3,          // other foods seen at this meal at least twice (offered unticked)
+  skipMeals: ['Late Night Snack'],
+};
+
+/**
+ * @returns { meals, due, skipped }  meals: every regular meal learned for today's day-type;
+ *          due: those with nothing logged for them yet, past their usual time (+grace). Each meal:
+ *          { key, mealType, typicalMin, madMin, freq, mealDays, loggedDays, covered, usual:[{name, share, staple}] }
+ */
+export function detectMeals(entries, ctx, options = {}) {
+  const o = { ...MEAL_DEFAULTS, ...options };
+  const { todayIso, nowMin } = ctx;
+  const dayType = dayTypeOf(todayIso);
+  const start = addDays(todayIso, -o.windowDays);
+
+  const past = entries.filter((e) => e.date && e.date >= start && e.date < todayIso);
+  const today = entries.filter((e) => e.date === todayIso);
+
+  const recentStart = addDays(todayIso, -o.activityDays);
+  const activeDays = new Set(past.filter((e) => e.date >= recentStart).map((e) => e.date)).size;
+  if (activeDays < o.minActiveDays) {
+    return { meals: [], due: [], skipped: `inactive (logged on ${activeDays} of the last ${o.activityDays} days)` };
+  }
+
+  const same = past.filter((e) => dayTypeOf(e.date) === dayType);
+  const loggedDays = new Set(same.map((e) => e.date)).size;
+  if (loggedDays < o.minLoggedDays) {
+    return { meals: [], due: [], skipped: `not enough ${dayType} history (${loggedDays} logged days)` };
+  }
+
+  // group by meal type: days it occurred, first-entry time per day, foods per day
+  const byMeal = new Map();
+  for (const e of same) {
+    const meal = String(e.mealType || '').trim();
+    const min = parseTimeMin(e.time);
+    if (!meal || min == null || o.skipMeals.includes(meal)) continue;
+    if (!byMeal.has(meal)) byMeal.set(meal, { firstByDay: new Map(), foods: new Map() });
+    const g = byMeal.get(meal);
+    g.firstByDay.set(e.date, Math.min(g.firstByDay.get(e.date) ?? Infinity, min));
+    const name = String(e.name).trim();
+    const k = name.toLowerCase();
+    if (!g.foods.has(k)) g.foods.set(k, { name, days: new Set() });
+    g.foods.get(k).days.add(e.date);
+  }
+
+  const todayMins = today.map((e) => ({ meal: String(e.mealType || '').trim(), min: parseTimeMin(e.time) }));
+
+  const meals = [];
+  for (const [meal, g] of byMeal) {
+    const mealDays = g.firstByDay.size;
+    const freq = mealDays / loggedDays;
+    if (mealDays < o.minMealDays || freq < o.minMealFreq) continue;
+    const mins = [...g.firstByDay.values()];
+    const typical = median(mins);
+    const mad = median(mins.map((m) => Math.abs(m - typical)));
+    if (mad > o.maxMealMadMin) continue;
+
+    const foods = [...g.foods.values()]
+      .map((f) => ({ name: f.name, count: f.days.size, share: f.days.size / mealDays }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+    const staples = foods.filter((f) => f.share >= o.stapleShare).slice(0, o.maxStaples)
+      .map((f) => ({ name: f.name, share: f.share, staple: true }));
+    const others = foods.filter((f) => f.share < o.stapleShare && f.count >= 2).slice(0, o.maxOthers)
+      .map((f) => ({ name: f.name, share: f.share, staple: false }));
+
+    // Covered: logged under this meal type, or anything logged close to the usual time of this meal.
+    const covered = todayMins.some((t) => t.meal === meal || (t.min != null && Math.abs(t.min - typical) <= o.coverWindowMin));
+
+    meals.push({
+      key: `meal-${habitKey(meal)}`, mealType: meal,
+      typicalMin: Math.round(typical), madMin: Math.round(mad),
+      freq, mealDays, loggedDays, covered, usual: [...staples, ...others],
+    });
+  }
+  meals.sort((a, b) => a.typicalMin - b.typicalMin);
+
+  if (nowMin >= o.quietStartMin || nowMin < o.quietEndMin) {
+    return { meals, due: [], skipped: 'quiet hours' };
+  }
+  const due = meals.filter((m) => !m.covered
+    && nowMin >= m.typicalMin + o.mealGraceMin && nowMin <= m.typicalMin + o.mealMaxLateMin);
+  return { meals, due, skipped: null };
+}

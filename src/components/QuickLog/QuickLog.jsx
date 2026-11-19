@@ -61,13 +61,14 @@ export default function QuickLog() {
   const foods = params.getAll('food').map((s) => s.trim());
   const meals = params.getAll('meal').map((s) => s.trim());
   const review = params.get('review') === '1';
+  const pre = params.getAll('pre'); // aligned with food=; '0' means start unticked (foods eaten only sometimes)
   const items = foods.map((food, i) => ({ food, meal: meals[i] || meals[0] || '' })).filter((x) => x.food);
 
   // working | review | done | error
   const [phase, setPhase] = useState('working');
   const [message, setMessage] = useState('');
   const [user, setUser] = useState(null);
-  const [checked, setChecked] = useState(() => items.map(() => true));
+  const [checked, setChecked] = useState(() => items.map((_, i) => pre[i] !== '0'));
   const [results, setResults] = useState([]); // [{food, status}]
   const [busy, setBusy] = useState(false);
 
@@ -141,7 +142,7 @@ export default function QuickLog() {
       {phase === 'review' && (
         <>
           <h2 style={{ margin: '0 0 6px' }}>Did you have these today?</h2>
-          <p style={{ margin: '0 0 14px', color: '#6b7280', fontSize: 14 }}>Untick anything you skipped.</p>
+          <p style={{ margin: '0 0 14px', color: '#6b7280', fontSize: 14 }}>Tick what you had.</p>
           {items.map((it, i) => (
             <label key={`${it.food}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid #eef0f6', cursor: 'pointer' }}>
               <input
