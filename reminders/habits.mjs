@@ -20,8 +20,8 @@ export const DEFAULTS = {
   maxMadMin: 45,       // median absolute deviation of the eating time (minutes): "consistent time"
   graceMin: 60,        // wait this long past the usual time before nudging
   maxLateMin: 240,     // stop nudging this long after the usual time
-  activityDays: 7,     // user must have logged on >= minActiveDays of the last N days
-  minActiveDays: 3,
+  activityDays: 14,    // keep reminding as long as the user logged on >= minActiveDays of the last N days.
+  minActiveDays: 1,    // (Forgetting for a few days is exactly when a reminder helps; after 2 weeks of silence we stop.)
   quietStartMin: 21 * 60 + 30, // no reminders from 21:30 ...
   quietEndMin: 7 * 60,         // ... until 07:00 (local time)
   maxItems: 3,         // at most this many foods in one email
@@ -174,7 +174,8 @@ export const MEAL_DEFAULTS = {
   minMealFreq: 0.6,      // ...and on at least this share of logged days
   maxMealMadMin: 60,     // "regular time": median absolute deviation of the meal's first entry (minutes)
   mealGraceMin: 45,      // wait this long past the usual meal time before nudging
-  mealMaxLateMin: 180,   // stop nudging this long after it
+  mealMaxLateMin: 240,   // stop nudging this long after it, or when the next regular meal is due, whichever is first
+                         // (so a delayed or skipped scheduler run still catches the meal later on)
   coverWindowMin: 60,    // any entry within this many minutes of the usual meal time counts as having logged it
   stapleShare: 0.5,      // a food eaten at >= half of this meal's days is a "usual" food for it
   maxStaples: 5,
@@ -202,10 +203,14 @@ export function detectMeals(entries, ctx, options = {}) {
     return { meals: [], due: [], skipped: `inactive (logged on ${activeDays} of the last ${o.activityDays} days)` };
   }
 
-  const same = past.filter((e) => dayTypeOf(e.date) === dayType);
+  // Prefer like with like (weekdays with weekdays). If there are too few such days, learn from all days instead
+  // of staying silent.
+  let same = past.filter((e) => dayTypeOf(e.date) === dayType);
+  let basis = dayType;
+  if (new Set(same.map((e) => e.date)).size < o.minLoggedDays) { same = past; basis = 'all days'; }
   const loggedDays = new Set(same.map((e) => e.date)).size;
   if (loggedDays < o.minLoggedDays) {
-    return { meals: [], due: [], skipped: `not enough ${dayType} history (${loggedDays} logged days)` };
+    return { meals: [], due: [], skipped: `not enough history (${loggedDays} logged days)` };
   }
 
   // group by meal type: days it occurred, first-entry time per day, foods per day
@@ -257,7 +262,12 @@ export function detectMeals(entries, ctx, options = {}) {
   if (nowMin >= o.quietStartMin || nowMin < o.quietEndMin) {
     return { meals, due: [], skipped: 'quiet hours' };
   }
-  const due = meals.filter((m) => !m.covered
-    && nowMin >= m.typicalMin + o.mealGraceMin && nowMin <= m.typicalMin + o.mealMaxLateMin);
-  return { meals, due, skipped: null };
+  // A meal stays "due" until the next regular meal's usual time (at most mealMaxLateMin), so a late run still reminds.
+  const due = meals.filter((m, i) => {
+    if (m.covered || nowMin < m.typicalMin + o.mealGraceMin) return false;
+    const next = meals.slice(i + 1).find((x) => x.typicalMin > m.typicalMin + o.mealGraceMin);
+    const end = Math.min(m.typicalMin + o.mealMaxLateMin, next ? next.typicalMin : Infinity);
+    return nowMin <= end;
+  });
+  return { meals, due, skipped: null, basis };
 }
